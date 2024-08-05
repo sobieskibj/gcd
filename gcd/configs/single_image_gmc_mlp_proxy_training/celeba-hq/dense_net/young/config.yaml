@@ -1,0 +1,71 @@
+mode: RUN
+seed: 0
+device: cuda:0
+output_dir: # Added during runtime
+
+strategy:
+
+  _target_: strategies.SingleImageGMCMLPProxyTraining
+  src_img_path: ???
+  n_iters: 52
+  n_steps_dae: 8
+  n_steps_proxy: 1024 # number of proxy epochs
+  min_max_step_size: [0.0001, 3.]
+  device: ${device}
+  output_dir: ${output_dir}/strategy
+  center_to_src_latent_sem: true
+  line_search_weight_cls_list: [1.0, 0.05]
+  line_search_weight_lpips_list: [0, 1.0]
+  n_hessian_eigenvecs: 6
+  dae_type: default
+
+  dae_kwargs: 
+    config_name: ffhq256_autoenc
+    batch_size: 128
+    std: [0.01, 0.05, 0.075, 0.1]
+    distribution: uniform_norm
+    max_norm: 1
+    T_encode: 250
+    T_render: 100
+    path_ckpt: ???
+    device: ${device}
+    output_dir: ${output_dir}/dae
+
+  mc_mlp_proxy_kwargs: 
+    shapes: [512, 256, 128, 64, 4] # 3 classes + 1 for lpips
+    activ_fn: sigmoid
+    batch_size: 128
+    n_val_batches: 1
+    val_loss_history_length: 5 # 10 was probably too much
+    optimizer:
+      _partial_: true
+      _target_: torch.optim.AdamW
+      lr: 0.001
+    loss_kwargs:
+      weight_cls: 1.0
+      weight_lpips: 3.0
+    device: ${device}
+    output_dir: ${output_dir}/proxy
+
+  ce_loss_kwargs:
+      weight_cls: 1.0
+      weight_lpips: 0
+      device: ${device}
+      output_dir: ${output_dir}/loss
+      components: 
+        _target_: losses.CounterfactualLossGeneralComponents 
+        lpips_net: vgg
+        src_img_path: ${strategy.src_img_path}
+        device: ${device}
+        clf: 
+          _target_: classifiers.DenseNet
+          img_size: 256
+          path_to_weights: ???
+          query_label: 2 # young
+          use_probs_and_query_label: false
+          task: multilabel_classification
+
+wandb:
+  project: null
+  group: null
+  name: null

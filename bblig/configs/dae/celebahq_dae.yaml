@@ -1,0 +1,5 @@
+_target_: dae.DAE
+config_name: ffhq256_autoenc
+path_ckpt: data/weights/dae/ffhq256_autoenc/last.ckpt
+T_encode: 250
+T_render: 100

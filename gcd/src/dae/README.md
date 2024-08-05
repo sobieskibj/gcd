@@ -1,0 +1,1 @@
+Code ported from the original Diffusion Autoencoders codebase and adapted.

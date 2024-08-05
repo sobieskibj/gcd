@@ -1,0 +1,30 @@
+defaults:
+  - _self_
+  - dataset: celebahq
+  - dae: celebahq_dae
+  - classifier: celebahq_densenet
+  - gcd: default
+
+exp:
+  run_func: 
+    _target_: experiment.run_sig
+  seed: 42
+  log_dir: # set during runtime to automatically created dir
+
+  n_unique: 1 # number of unique images per batch
+  n_steps: 128 # number of steps along gcd when searching for baseline
+  n_samples: 128 # n_samples = dataset length
+
+  max_step_size: 3.0
+  path_length: 128
+  thr_prob: 0.01
+  approx_grad: false
+  target_id: 2 # young, id of target label
+  
+  # effective batch size is equal to n_unique * n_steps
+
+fabric:
+  num_nodes: 1
+
+wandb:
+  project: enhancing_sig

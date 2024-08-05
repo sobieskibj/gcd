@@ -1,0 +1,5 @@
+_target_: dae.DAECheXpert
+config_name: chexpert224_autoenc
+path_ckpt: data/weights/dae/chexpert224_autoenc/weights.ckpt
+T_encode: 250
+T_render: 100

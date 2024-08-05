@@ -1,0 +1,2 @@
+_target_: classifier.DenseNetCheXpert
+path_ckpt: data/weights/classifiers/chexpert/densenet/weights.ckpt

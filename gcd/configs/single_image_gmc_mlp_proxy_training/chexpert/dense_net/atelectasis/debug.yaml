@@ -1,0 +1,17 @@
+defaults:
+- config
+
+strategy:
+  n_iters: 5
+  n_steps_dae: 1
+  n_steps_proxy: 100
+
+  dae_kwargs:
+  #   T_encode: 250
+    T_render: 2
+  #   batch_size: 4
+
+  mc_mlp_proxy_kwargs: 
+    n_val_batches: 1
+    val_loss_history_length: 3
+    batch_size: 8

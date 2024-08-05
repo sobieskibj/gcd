@@ -1,0 +1,2 @@
+_target_: classifier.DenseNet
+path_ckpt: data/weights/classifiers/celebahq/densenet/ckpt.tar

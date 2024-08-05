@@ -1,0 +1,9 @@
+defaults:
+- config
+
+mode: MULTIRUN
+
+hydra:
+  sweep:
+    dir: null
+    subdir: null
