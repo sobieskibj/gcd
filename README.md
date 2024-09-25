@@ -1,6 +1,6 @@
 # [ECCV 2024] Global Counterfactual Directions
 
-Official implementation of Global Counterfactual Directions accepted to ECCV 2024.
+Official implementation of [Global Counterfactual Directions](https://arxiv.org/abs/2404.12488) accepted to ECCV 2024.
 
 ![teaser](teaser.png)
 
