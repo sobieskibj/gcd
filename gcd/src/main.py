@@ -5,6 +5,9 @@ import omegaconf
 from omegaconf import DictConfig
 
 from utils import extract_output_dir_path_from_config, set_seed
+from dotenv import load_dotenv
+
+load_dotenv()
 
 log = logging.getLogger(__name__)
 

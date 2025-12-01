@@ -17,7 +17,7 @@ class DAECheXpert(nn.Module):
     """
 
     def __init__(
-            self, 
+            self,
             config_name: str,
             batch_size: int,
             std: Union[float, List[float]],
@@ -30,7 +30,7 @@ class DAECheXpert(nn.Module):
             max_norm: float = 1.,
             make_output_dir: bool = True):
         """
-        batch_size - size of the batch containing perturbed latent representations 
+        batch_size - size of the batch containing perturbed latent representations
             of source image
         T_encode - number of diffusion steps for encoding
         T_render - number of diffusion steps for rendering
@@ -93,18 +93,28 @@ class DAECheXpert(nn.Module):
                                                x,
                                                model_kwargs = {'cond': cond})
         return out['sample']
-    
+
     @torch.no_grad()
-    def render(self, noise, cond, T = None):
+    def render(self, noise, cond, T = None, max_batch: int = None):
         if T is not None:
             sampler = self.config._make_diffusion_conf(T).make_sampler()
         else:
             sampler = self.sampler_render
-        pred_img = render_condition(self.config,
-                                    self.model,
-                                    noise,
-                                    sampler = sampler,
-                                    cond = cond)
+        # Chunked rendering to reduce peak memory
+        N = noise.shape[0]
+        if max_batch is None:
+            max_batch = min(N, 32)
+        outs = []
+        for i in range(0, N, max_batch):
+            n_chunk = noise[i:i + max_batch]
+            c_chunk = cond[i:i + max_batch] if cond is not None else None
+            out = render_condition(self.config,
+                                   self.model,
+                                   n_chunk,
+                                   sampler = sampler,
+                                   cond = c_chunk)
+            outs.append(out)
+        pred_img = torch.cat(outs, dim = 0)
         pred_img = (pred_img + 1) / 2
         return pred_img
 
@@ -116,8 +126,8 @@ class DAECheXpert(nn.Module):
             chunk_size = self.batch_size // len(self.std)
             for std in self.std:
                 noise = torch.normal(
-                            mean = 0., 
-                            std = std, 
+                            mean = 0.,
+                            std = std,
                             size = (chunk_size, latent_sem.shape[1]),
                             device = self.device)
                 noises.append(noise)
@@ -126,8 +136,8 @@ class DAECheXpert(nn.Module):
         elif self.distribution == 'uniform_norm':
             log.info(f'Sampling latent sem perturbations from uniform distribution over norm from the interval [0, {self.max_norm}]')
             noise = torch.normal(
-                        mean = 0., 
-                        std = 1., 
+                        mean = 0.,
+                        std = 1.,
                         size = (self.batch_size, latent_sem.shape[1]),
                         device = self.device)
             noise /= noise.norm(dim = 1).unsqueeze(1)

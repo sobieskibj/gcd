@@ -11,5 +11,8 @@ def make_config(config_name):
     elif config_name == 'celeba128_autoenc':
         log.info(f'Using config: {config_name}')
         return celeba128_autoenc()
+    elif config_name == 'imagenet256_autoenc':
+        log.info(f'Using config: {config_name}')
+        return imagenet256_autoenc()
     else:
         raise NotImplementedError('Invalid config name or option not implemented yet')

@@ -11,6 +11,10 @@ from proxies import GeneralMulticomponentMLP
 from losses import CounterfactualLossFromGeneralComponents
 from strategies import Strategy
 from utils import *
+from datasets import load_dataset
+import torchvision.transforms as T
+from PIL import Image
+import os
 
 import logging
 logging.basicConfig(level = logging.INFO)
@@ -32,7 +36,6 @@ class SingleImageGMCMLPProxyTraining(Strategy):
 
     def __init__(
         self,
-        src_img_path: str,
         n_iters: int,
         n_steps_dae: int,
         n_steps_proxy: int,
@@ -43,10 +46,22 @@ class SingleImageGMCMLPProxyTraining(Strategy):
         n_hessian_eigenvecs: int,
         device: str,
         output_dir: str,
-        mc_mlp_proxy_kwargs: dict, 
+        mc_mlp_proxy_kwargs: dict,
         dae_kwargs: dict,
         ce_loss_kwargs: dict,
-        dae_type: str = 'default'):
+        src_img_path: str = None,
+        dae_type: str = 'default',
+        # Optional HF dataset source for picking the source image by label
+        hf_dataset_name: str = None,     # e.g., 'imagenet-1k'
+        hf_split: str = 'train',
+        hf_label: int = None,            # required if using HF
+        hf_index: int = 0,               # which occurrence of that label to use
+        # Optional prediction-based filtering: pick a source image the classifier predicts correctly
+        hf_predictions_csv: str = None,  # CSV with index 'idx' and column 'pred_label'
+        hf_pred_index_scope: str = 'global',  # 'global' (enumerate whole split) or 'label' (enumerate only matching label)
+        hf_n_skip_filtered: int = 0,     # skip first N after filtering (sharding/offset)
+        hf_filter_by_predictions: bool = False,  # enable filtering
+        ):
         """
         src_img_path - path of the source image
         n_iters - number of outer loop iterations
@@ -56,7 +71,7 @@ class SingleImageGMCMLPProxyTraining(Strategy):
         n_steps_proxy - number of epochs for proxy training in each outer iteration
             Note: the size of the  dataset for proxy training is n_steps_dae * self.dae.batch_size * n_iters
         min_max_step_size - coefficients that determine the  min and max size of the gradient step,
-            intermediate steps are distributed uniformly between these values and total number of 
+            intermediate steps are distributed uniformly between these values and total number of
             step sizes is equal to self.dae.batch_size
         center_to_src_latent_sem - whether to center all latent sems at src_latent_sem
         n_hessian_eigenvecs - number of hessian eigenvectors used in line search
@@ -74,12 +89,30 @@ class SingleImageGMCMLPProxyTraining(Strategy):
         self.device_cpu = torch.device('cpu')
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents = True)
-        
+
         self.dae = self.get_dae_class(dae_type)(**dae_kwargs)
         self.proxy = GeneralMulticomponentMLP(**mc_mlp_proxy_kwargs)
         self.ce_loss = CounterfactualLossFromGeneralComponents(**ce_loss_kwargs)
 
-        self.load_src_img(src_img_path)
+        # Load source image either from local path or HF dataset by label
+        if src_img_path is not None:
+            self.load_src_img(src_img_path)
+        elif hf_dataset_name is not None and hf_label is not None:
+            self.load_src_img_from_hf(
+                dataset_name = hf_dataset_name,
+                split = hf_split,
+                label = hf_label,
+                index = hf_index,
+                predictions_csv = hf_predictions_csv,
+                pred_index_scope = hf_pred_index_scope,
+                n_skip_filtered = hf_n_skip_filtered,
+                filter_by_predictions = hf_filter_by_predictions,
+                hf_token = os.getenv('HF_TOKEN', None),
+                cache_dir = os.getenv('DATASET_CACHE', None),
+                image_size = self.dae.config.img_size if hasattr(self.dae, 'config') else 256
+            )
+        else:
+            raise ValueError("Provide either src_img_path or (hf_dataset_name and hf_label).")
         self.clear_proxy_training_data()
 
     def get_dae_class(self, dae_type):
@@ -93,6 +126,98 @@ class SingleImageGMCMLPProxyTraining(Strategy):
         src_img = torchvision.io.read_image(path).unsqueeze(0) / 255
         torchvision.utils.save_image(src_img, self.output_dir / 'src_img.png')
         # Scale to [-1, 1] for DAE
+        src_img = (src_img - 0.5) * 2
+        self.src_img = src_img.to(self.device)
+
+    def load_src_img_from_hf(
+        self,
+        dataset_name: str,
+        split: str,
+        label: int,
+        index: int = 0,
+        predictions_csv: str = None,
+        pred_index_scope: str = 'label',   # 'global' | 'label'
+        n_skip_filtered: int = 0,
+        filter_by_predictions: bool = False,
+        hf_token: str = None,
+        cache_dir: str = None,
+        image_size: int = 256,
+    ):
+        """
+        Load one source image from a HF dataset (e.g., 'imagenet-1k') by label id.
+        If filter_by_predictions is True, uses predictions_csv to keep only samples correctly
+        predicted as 'label'. You can choose how indices are matched via pred_index_scope:
+          - 'global': idx equals enumerate() over whole split (0-based)
+          - 'label' : idx equals enumerate() over only samples with ex['label'] == label (0-based)
+        """
+        log.info(f'Loading source image from HF dataset: {dataset_name}, split: {split}, label: {label}, index: {index}')
+        # Use streaming iteration to avoid materializing a full filtered copy (much faster)
+        stream_kwargs = {"streaming": True}
+        if hf_token is not None:
+            stream_kwargs["token"] = hf_token
+        if cache_dir is not None:
+            stream_kwargs["cache_dir"] = cache_dir
+        ds_stream = load_dataset(dataset_name, split=split, **stream_kwargs)
+
+        preds_df = None
+        if filter_by_predictions:
+            if predictions_csv is None or not os.path.exists(predictions_csv):
+                raise FileNotFoundError(f"Filtering by predictions requested but CSV not found: {predictions_csv}")
+            preds_df = pd.read_csv(predictions_csv, index_col='idx')
+            if 'pred_label' not in preds_df.columns:
+                raise ValueError(f"Predictions CSV missing 'pred_label' column: {predictions_csv}")
+
+        label_enum = -1        # counts only samples with matching label
+        global_enum = -1       # counts all samples
+        filtered_seen = -1     # counts only samples that passed predictions filter
+        sample = None
+        for ex in ds_stream:
+            global_enum += 1
+            # keep only target label
+            if ex.get("label", None) != label:
+                continue
+            label_enum += 1
+
+            if filter_by_predictions:
+                idx_to_check = global_enum if pred_index_scope == 'global' else label_enum
+                if idx_to_check not in preds_df.index:
+                    continue
+                pred_label = int(preds_df.loc[idx_to_check, 'pred_label'])
+                if pred_label != int(label):
+                    continue
+                filtered_seen += 1
+                if filtered_seen < n_skip_filtered:
+                    continue
+                # pick by filtered order
+                if filtered_seen == index:
+                    sample = ex
+                    break
+            else:
+                # original behavior: pick by label occurrence
+                if label_enum == index:
+                    sample = ex
+                    break
+        if sample is None:
+            if filter_by_predictions:
+                raise ValueError(f"Could not find filtered occurrence index {index} for label {label} in {dataset_name}/{split} "
+                                 f"(pred_index_scope={pred_index_scope}, n_skip_filtered={n_skip_filtered})")
+            else:
+                raise ValueError(f"Could not find occurrence index {index} for label {label} in {dataset_name}/{split}")
+        img = sample['image']
+        if not isinstance(img, Image.Image):
+            img = Image.fromarray(img)
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        # Resize/center-crop to target image_size
+        transform = T.Compose([
+            T.CenterCrop(image_size),
+            T.Resize(image_size),
+            T.ToTensor(),          # [0,1]
+        ])
+        src_img = transform(img).unsqueeze(0)
+        # Save [0,1] preview
+        torchvision.utils.save_image(src_img, self.output_dir / 'src_img.png')
+        # Scale to [-1,1] for DAE
         src_img = (src_img - 0.5) * 2
         self.src_img = src_img.to(self.device)
 
@@ -134,7 +259,7 @@ class SingleImageGMCMLPProxyTraining(Strategy):
         log.info(f'Saving synthetic images to {output_dir}')
         torchvision.utils.save_image(batch_imgs, output_dir / 'imgs.png')
         # NOTE: DAE requires input to be in [-1, 1] but outputs imgs in [0, 1]
-        
+
         # Compute counterfactual loss components
         log.info('Calculating counterfactual loss components')
         # In general case, we use counterfactual loss to provide us with
@@ -147,20 +272,20 @@ class SingleImageGMCMLPProxyTraining(Strategy):
         batch_predictions = batch_components['predictions']
         batch_probs = self.ce_loss.get_query_label_probability(batch_predictions)
         batch_logits = self.ce_loss.get_query_label_logit(batch_predictions)
-        
+
         # Log pareto fronts
         log_wandb_scatter(
-            batch_logits.flatten().numpy(force = True), 
-            batch_lpips.flatten().numpy(force = True), 
-            'logits from classifier', 'lpips', 
+            batch_logits.flatten().numpy(force = True),
+            batch_lpips.flatten().numpy(force = True),
+            'logits from classifier', 'lpips',
             f'dae/pareto/logits/iter:{iter}/{step_idx}')
         log_wandb_scatter(
-            batch_probs.flatten().numpy(force = True), 
-            batch_lpips.flatten().numpy(force = True), 
-            'probabilities from classifier', 'lpips', 
+            batch_probs.flatten().numpy(force = True),
+            batch_lpips.flatten().numpy(force = True),
+            'probabilities from classifier', 'lpips',
             f'dae/pareto/probs/iter:{iter}/{step_idx}')
 
-        # Log info 
+        # Log info
         ce_ids = batch_probs < 0.5 if self.ce_loss.components.clf_pred_label == 1 else batch_probs > 0.5
         log.info(f'Number of CEs in synthetic images: {batch_probs[ce_ids].shape[0]}')
         log.info(f'Saving info file to {output_dir}')
@@ -170,7 +295,7 @@ class SingleImageGMCMLPProxyTraining(Strategy):
             batch_lpips.numpy(force = True).flatten(),
             ce_ids.numpy(force = True)]).T
         df = pd.DataFrame(
-            df_data, 
+            df_data,
             columns = ['norm', 'clf_prob', 'lpips', 'is_ce'])
         df.to_csv(output_dir / 'info.csv')
 
@@ -197,7 +322,7 @@ class SingleImageGMCMLPProxyTraining(Strategy):
             torchvision.utils.save_image(diffs_ces_grid, output_dir / 'diffs_ces.png')
 
         # Save proxy training data
-        log.info('Saving data for proxy training')            
+        log.info('Saving data for proxy training')
         if self.center_to_src_latent_sem:
             batch_latent_sem = batch_latent_sem - self.src_latent_sem
         self.save_proxy_training_data(batch_latent_sem, batch_components)
@@ -211,7 +336,7 @@ class SingleImageGMCMLPProxyTraining(Strategy):
     def proxy_step(self, step_idx, iter):
         log.info(f'Step: {step_idx}')
         self.proxy.run_epoch(self.proxy_training_data, step_idx, iter)
-            
+
     def post_proxy_loop(self, iter):
         # Take steps of different magnitude in negative gradient direction aka line search
         # Gradient is calculated for one or more (weight_cls, weight_lpips) pairs and
@@ -220,12 +345,14 @@ class SingleImageGMCMLPProxyTraining(Strategy):
         chunk_size = self.dae.batch_size // len(grads_dict)
         n_directions = len(self.weight_cls_lpips_pairs) + self.n_hessian_eigenvecs
         step_sizes_stack = torch.linspace(
-            *self.min_max_step_size, 
+            *self.min_max_step_size,
             chunk_size,
             device = self.device).repeat(n_directions).unsqueeze(1)
         grads_stack = torch.stack([*grads_dict.values()]).repeat_interleave(chunk_size, 0).squeeze()
         batch_latent_sem = self.src_latent_sem - step_sizes_stack * grads_stack
-        batch_latent_ddim = self.dae.make_batch_latent_ddim(self.src_latent_ddim)
+        # Match DDIM batch to the exact number of latent_sem samples (may be < dae.batch_size)
+        n_ls = batch_latent_sem.shape[0]
+        batch_latent_ddim = self.src_latent_ddim.repeat(n_ls, 1, 1, 1)
 
         # Generate images from line search latent sems
         log.info('Rendering line search images')
@@ -252,9 +379,9 @@ class SingleImageGMCMLPProxyTraining(Strategy):
             weights_pairs += [(1.0, 0.0) for _ in range(chunk_size * self.n_hessian_eigenvecs)]
 
         self.proxy.line_search_validation(
-            batch_latent_sem = batch_latent_sem, 
-            batch_components = batch_components, 
-            query_label = self.ce_loss.components.classifier.query_label, 
+            batch_latent_sem = batch_latent_sem,
+            batch_components = batch_components,
+            query_label = self.ce_loss.components.classifier.query_label,
             iter = iter,
             step_sizes = step_sizes_stack,
             weights_pairs = weights_pairs,
@@ -263,7 +390,7 @@ class SingleImageGMCMLPProxyTraining(Strategy):
 
         # Calculate counterfactual loss on line search images
         batch_losses = self.ce_loss(
-                batch_components, 
+                batch_components,
                 pos_label_idx = self.ce_loss.components.classifier.query_label)
 
         # Log info about line search
@@ -279,14 +406,14 @@ class SingleImageGMCMLPProxyTraining(Strategy):
 
         # Log pareto fronts
         log_wandb_scatter(
-            batch_logits.flatten().numpy(force = True), 
-            batch_lpips.flatten().numpy(force = True), 
-            'logits from classifier', 'lpips', 
+            batch_logits.flatten().numpy(force = True),
+            batch_lpips.flatten().numpy(force = True),
+            'logits from classifier', 'lpips',
             f'proxy/line_search/pareto/logits/iter:{iter}')
         log_wandb_scatter(
-            batch_probs.flatten().numpy(force = True), 
-            batch_lpips.flatten().numpy(force = True), 
-            'probabilities from classifier', 'lpips', 
+            batch_probs.flatten().numpy(force = True),
+            batch_lpips.flatten().numpy(force = True),
+            'probabilities from classifier', 'lpips',
             f'proxy/line_search/pareto/probs/iter:{iter}')
 
         # Log info and counterfactuals if any
@@ -303,10 +430,10 @@ class SingleImageGMCMLPProxyTraining(Strategy):
             batch_lpips.numpy(force = True).flatten(),
             ce_ids.numpy(force = True)]).T
         df = pd.DataFrame(
-            df_data, 
+            df_data,
             columns = ['step_size', 'from_hess_vec', 'weight_cls', 'weight_lps', 'clf_prob', 'lpips', 'is_ce'])
         df.to_csv(output_dir / 'info.csv')
-        
+
         src_img = self.get_src_img()
         diffs = (batch_imgs - src_img).abs()
         diffs_scaled = diffs / diffs.amax(dim = (1, 2, 3)).view(-1, 1, 1, 1)
@@ -361,7 +488,7 @@ class SingleImageGMCMLPProxyTraining(Strategy):
             log.info(f'Computing hessian for weight_cls: 1.0 and weight_lpips: 0.0')
             input.requires_grad_()
             func = lambda x: self.ce_loss(
-                self.proxy(x), 
+                self.proxy(x),
                 pos_label_idx = self.ce_loss.components.classifier.query_label,
                 weight_cls = 1.0,
                 weight_lpips = 0.0)
@@ -401,10 +528,9 @@ class SingleImageGMCMLPProxyTraining(Strategy):
     def save_proxy_training_data(self, batch_latent_sem, batch_components):
         self.proxy_training_data['latent_sem'].append(batch_latent_sem)
         self.proxy_training_data['components'].append(batch_components)
-        
+
     def clear_proxy_training_data(self):
         self.proxy.increment_data_save_counter()
         self.proxy_training_data = {
             'latent_sem': [],
             'components': []}
-        

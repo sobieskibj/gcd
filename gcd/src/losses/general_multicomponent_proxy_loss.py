@@ -30,8 +30,8 @@ class GeneralMulticomponentProxyLoss(nn.Module):
         pred_lpips = inputs['lpips']
         target_lpips = targets['lpips']
 
-        assert pred_preds.shape == target_preds.shape
-        assert pred_lpips.shape == target_lpips.shape
+        assert pred_preds.shape == target_preds.shape, f"Invalid shapes: {pred_preds.shape = } and {target_preds.shape = }"
+        assert pred_lpips.shape == target_lpips.shape, f"Invalid shapes: {pred_lpips.shape = } and {target_lpips.shape = }"
 
         loss = self.weight_cls * F.mse_loss(pred_preds, target_preds) + \
             self.weight_lpips * F.mse_loss(pred_lpips, target_lpips)

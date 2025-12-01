@@ -1,0 +1,73 @@
+mode: RUN
+seed: 0
+device: cuda:0
+output_dir:
+
+strategy:
+  _target_: strategies.SingleImageGMCMLPProxyTraining
+  src_img_path: ???                      # path to source zebra image (.png or .jpg)
+  n_iters: 20
+  n_steps_dae: 8
+  n_steps_proxy: 512
+  min_max_step_size: [0.0005, 2.0]
+  device: ${device}
+  output_dir: ${output_dir}/strategy
+  center_to_src_latent_sem: true
+  line_search_weight_cls_list: [1.0, 0.05]
+  line_search_weight_lpips_list: [0, 1.0]
+  n_hessian_eigenvecs: 16
+  dae_type: default
+
+  dae_kwargs:
+    config_name: imagenet256_autoenc
+    batch_size: 256
+    std: [0.01, 0.05, 0.1, 0.2]
+    distribution: uniform_norm
+    max_norm: 1.0
+    T_encode: 250
+    T_render: 50
+    path_ckpt: ???                       # path to your trained DiffAE checkpoint (.ckpt)
+    device: ${device}
+    output_dir: ${output_dir}/dae
+
+  mc_mlp_proxy_kwargs:
+    shapes: [512, 256, 128, 64, 1001]
+    activ_fn: sigmoid
+    batch_size: 128
+    n_val_batches: 1
+    val_loss_history_length: 5
+    optimizer:
+      _partial_: true
+      _target_: torch.optim.AdamW
+      lr: 0.001
+    loss_kwargs:
+      weight_cls: 1.0
+      weight_lpips: 3.0
+    device: ${device}
+    output_dir: ${output_dir}/proxy
+
+  ce_loss_kwargs:
+    weight_cls: 1.0
+    weight_lpips: 0
+    device: ${device}
+    output_dir: ${output_dir}/loss
+    components:
+      _target_: losses.CounterfactualLossGeneralComponents
+      lpips_net: vgg
+      src_img_path: ${strategy.src_img_path}
+      device: ${device}
+      clf:
+        _target_: classifiers.ImageNetResNet
+        img_size: 256
+        query_label: 340                 # zebra class id
+        use_softmax_and_query_label: false
+        task: multiclass_classification
+        model_name: resnet50
+        weights: IMAGENET1K_V2
+        path_to_weights: null            # optional: path to custom weights
+
+wandb:
+  project: null
+  group: null
+  name: imagenet_zebra
+

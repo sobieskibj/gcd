@@ -8,5 +8,8 @@ def make_config(config_name):
     if config_name == 'chexpert224_autoenc':
         log.info(f'Using config: {config_name}')
         return chexpert224_autoenc()
+    elif config_name == 'imagenet256_autoenc':
+        log.info(f'Using config: {config_name}')
+        return imagenet256_autoenc()
     else:
         raise NotImplementedError('Invalid config name or option not implemented yet')

@@ -67,3 +67,19 @@ def celeba128_autoenc():
     conf.data_name = 'celeba128'
     conf.name = 'celeba128_autoenc'
     return conf
+
+def imagenet256_autoenc():
+    conf = ffhq256_autoenc()
+    conf.img_size = 256
+    conf.net_ch = 128
+    conf.net_ch_mult = (1, 1, 2, 2, 4, 4)
+    conf.net_enc_channel_mult = (1, 1, 2, 2, 4, 4, 4)
+    # Large defaults are OK for inference config stub; not used for training here
+    conf.eval_every_samples = 10_000_000
+    conf.eval_ema_every_samples = 10_000_000
+    conf.total_samples = 500_000_000
+    conf.batch_size = 64
+    conf.make_model_conf()
+    conf.name = 'imagenet256_autoenc'
+    conf.data_name = 'imagenet'
+    return conf
